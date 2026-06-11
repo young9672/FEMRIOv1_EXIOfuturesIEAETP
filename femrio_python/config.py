@@ -8,91 +8,84 @@ import pandas as pd
 from pathlib import Path
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-PROJECT_ROOT = Path(__file__).parent.parent
-DATA_ROOT = PROJECT_ROOT  # adjust if your EXIOBASE data lives elsewhere
+PROJECT_ROOT = Path(__file__).parent.parent   # FEMRIOv1_EXIOfuturesIEAETP/
+
+# !! Change this to your EXIOBASE data root on your machine !!
+# Example Windows path:  Path(r"C:\Users\Qiang\Documents\Exiobase v3.10.2")
+EXIOBASE_ROOT = Path(r"C:\Users\Qiang\Documents\Exiobase v3.10.2")
 
 # ── Time parameters ─────────────────────────────────────────────────────────────
 STARTYEAR = 1995
-ENDYEAR = 2014
+ENDYEAR   = 2014
 FINALYEAR = 2030
-NYEARS = ENDYEAR - STARTYEAR + 1       # 20  (1995-2014)
-TTLYEARS = FINALYEAR - STARTYEAR + 1   # 36  (1995-2030)
+NYEARS    = ENDYEAR - STARTYEAR + 1        # 20  (index 0–19 = 1995–2014)
+TTLYEARS  = FINALYEAR - STARTYEAR + 1      # 36  (index 0–35 = 1995–2030)
 
-# Projection years (5-year steps, matching original MATLAB)
-FUTURE_YEARS = list(range(ENDYEAR + 1, FINALYEAR + 1))        # 2015-2030 annual
-SAVE_YEARS = list(range(2020, FINALYEAR + 1, 5))               # 2020, 2025, 2030
+FUTURE_YEARS = list(range(ENDYEAR + 1, FINALYEAR + 1))   # 2015-2030
+SAVE_YEARS   = list(range(2020, FINALYEAR + 1, 5))        # 2020, 2025, 2030
 
-# ── Dimensions ──────────────────────────────────────────────────────────────────
-NPROD = 200   # products
-NIND = 163    # industries
-NVA = 12      # value-added categories
-NFD = 7       # final demand categories
-NREG = 49     # regions/countries
+# ── EXIOBASE ixi dimensions ──────────────────────────────────────────────────────
+NPROD = 163   # industries = rows/cols in ixi  (163 per region)
+NIND  = 163   # same as NPROD in ixi
+NVA   = 9     # value-added rows in factor_inputs (VA = wages+taxes+NOS etc.)
+NFD   = 7     # final demand categories per region
+NREG  = 49    # regions
 
-# Relevant VA rows for total GDP (rows 0-11, i.e. all VA)
-REL_VA = list(range(12))  # 0-indexed equivalent of MATLAB 1:12
+# Total sizes
+N  = NREG * NIND   # 7987  (full ixi dimension)
+NY = NREG * NFD    # 343   (full FD columns)
 
-# ── Sector indices (0-based, converted from MATLAB 1-based) ────────────────────
-# Electric vehicle modelling
-MOTVEH_IND = 90          # motor vehicle industry (MATLAB: 91)
-ELECMACH_PROD = 119      # electrical machinery product (MATLAB: 120)
+# Relevant VA rows (all, 0-based)
+REL_VA = list(range(NVA))
 
-# Construction
-CONSTRUCTION_PROD = 149  # (MATLAB: 150)
-CONSTRUCTION_IND = 112   # (MATLAB: 113)
+# ── Sector indices (0-based, from IEAEXIO struct iElec / pElec) ─────────────────
+# Electricity industry indices within one region (0-based, MATLAB gives 1-based)
+ELEC_IND_LOCAL = [95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106]  # 12 types
+ELEC_PROD_LOCAL = [127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138]  # same in ixi
 
-# ── Stressor indices (0-based) ──────────────────────────────────────────────────
-CO2_INDEX = 23           # CO2 stressor row (MATLAB: 24)
-VA_INDEX = list(range(9))  # rows 0-8
+# IEA energy product mapping to EXIOBASE rows (from iInd, iAgrFishBuild, iMiningTPED)
+# These are 0-based global indices within one-region block (MATLAB 1-based → subtract 1)
+IEA_IND_LOCAL        = list(range(34, 60))   # iInd  ≈ manufacturing/industry (MATLAB 35-60 area)
+IEA_AGR_FISH_LOCAL   = list(range(0, 5))     # iAgrFishBuild (MATLAB 1-5)
+IEA_MINING_LOCAL     = []                     # iMiningTPED (filled from IEAEXIO at runtime)
 
-# Employment stressors
-COE_IDX = list(range(2, 5))    # compensation of employees rows 2-4
-EMPL_IDX = list(range(9, 15))  # employment rows 9-14
-LS_IDX = [9, 10]               # low-skill
-MS_IDX = [11, 12]              # medium-skill
-HS_IDX = [13, 14]              # high-skill
-MALE_IDX = [9, 11, 13]
-FEMALE_IDX = [10, 12, 14]
-VULN_IDX = 21                  # vulnerable employment
+# Motor vehicle modelling (0-based)
+MOTVEH_IND_LOCAL  = 90   # MATLAB: 91
+ELECMACH_IND_LOCAL = 119  # MATLAB: 120  (used in SUT; in ixi maps to same col)
 
+# ── Stressor indices (0-based within stressor matrix) ──────────────────────────
+CO2_ROW = 0    # CO2 is typically the first row in air_emissions; confirm from your data
 
-def cou_sth_index(reg: int, pos: int, n: int) -> int:
-    """
-    Compute the global 0-based index for region `reg` (0-based),
-    position `pos` (0-based) within a block of size `n`.
+# ── Helper: index within global matrix ──────────────────────────────────────────
 
-    Mirrors MATLAB's CouSthIndex(reg, pos, n) which uses 1-based indexing:
-        CouSthIndex(reg, pos, n) = (reg-1)*n + pos
-    """
-    return reg * n + pos
+def reg_ind_slice(reg: int) -> slice:
+    """Return column/row slice for region reg (0-based) in the N×N ixi matrix."""
+    return slice(reg * NIND, (reg + 1) * NIND)
 
+def reg_fd_slice(reg: int) -> slice:
+    """Return column slice for region reg's final demand block."""
+    return slice(reg * NFD, (reg + 1) * NFD)
 
-def cou_slice(reg: int, n: int):
-    """Return a slice for region reg's block of size n."""
-    start = reg * n
-    return slice(start, start + n)
-
+def global_ind_idx(reg: int, local_idx: int) -> int:
+    """Convert (region, local_industry_idx) → global row/col index in N×N matrix."""
+    return reg * NIND + local_idx
 
 def load_metadata():
-    """Load EXIOBASE region/product/industry metadata from Excel."""
+    """Load EXIOBASE region/product/industry metadata from the project Excel."""
     xl_path = PROJECT_ROOT / "EXIOBASE_metadata.xlsx"
-
-    # Country codes and names (columns B, C → 0-indexed cols 1, 2)
     countries_df = pd.read_excel(xl_path, sheet_name="Countries", header=None)
     region_codes = countries_df.iloc[:NREG, 1].tolist()
     region_names = countries_df.iloc[:NREG, 2].tolist()
 
-    # Product-industry concordance (F7:FL206 → rows 6:206, cols 5:168)
-    prod_ind_df = pd.read_excel(
-        xl_path, sheet_name="ProdIndConcordance", header=None
-    )
-    # Row 6 (0-based) = row 7 in Excel; col 5 = F, col 5+163 = FL
-    ProdIndConcordance = prod_ind_df.iloc[6:206, 5:5 + NIND].values.astype(float)
+    # ProdIndConcordance: used in SUT market-share normalisation
+    # In ixi we don't need it directly, but keep for reference
+    prod_ind_df = pd.read_excel(xl_path, sheet_name="ProdIndConcordance", header=None)
+    ProdIndConcordance = prod_ind_df.iloc[6:206, 5:5 + 163].values.astype(float)
 
     return region_codes, region_names, ProdIndConcordance
 
 
 if __name__ == "__main__":
-    codes, names, pic = load_metadata()
-    print(f"Loaded {len(codes)} regions: {codes[:5]} ...")
-    print(f"ProdIndConcordance shape: {pic.shape}")
+    codes, names, _ = load_metadata()
+    print(f"Regions ({len(codes)}): {codes[:5]} ...")
+    print(f"N={N}, NY={NY}, TTLYEARS={TTLYEARS}")
